@@ -26,11 +26,25 @@ async def _confirm(check, target: bool, needed: int, interval: float = 1.5) -> b
     return True
 
 
-async def do_reboot(store: st.Store, manual: bool = False):
-    """Aplica salvaguardas y, si corresponde, reinicia el ONU.
+async def try_reboot(store: st.Store):
+    """Llamado repetidamente mientras hay corte. Espacia los intentos:
+    cooldown largo tras un reboot EXITOSO (deja re-sincronizar el ONU) y backoff
+    corto tras un intento FALLIDO (para reintentar pronto si el ONU estaba lento).
+    """
+    if store.last_attempt_ts is not None:
+        interval = config.REBOOT_COOLDOWN if store.last_reboot_ok else config.FAILED_REBOOT_BACKOFF
+        if time.time() - store.last_attempt_ts < interval:
+            return
+    await do_reboot(store)
 
-    manual=True (disparo desde el dashboard) saltea cooldown y tope de ventana
-    porque es una acción humana explícita, pero respeta REQUIRE_ONU_UP y DRY_RUN.
+
+async def do_reboot(store: st.Store, manual: bool = False):
+    """Reinicia el ONU si se cumplen las salvaguardas.
+
+    manual=True (dashboard) saltea el tope de ventana porque es una acción humana
+    explícita, pero respeta REQUIRE_ONU_UP y DRY_RUN. El espaciado entre intentos
+    automáticos lo maneja try_reboot; los intentos FALLIDOS no cuentan contra el
+    cooldown/tope (solo los reboots reales exitosos).
     """
     from reboot_onu import reboot_onu  # import perezoso (Playwright)
 
@@ -38,35 +52,31 @@ async def do_reboot(store: st.Store, manual: bool = False):
         store.add_event(st.INFO, "Ya hay un reboot en curso; ignoro el disparo.")
         return
     async with store.reboot_lock:
+        if not manual:
+            store.last_attempt_ts = time.time()
+
         # Salvaguarda 1: el ONU tiene que estar accesible (si no, reboot no ayuda).
         onu = await onu_alive()
         store.onu_up = onu
         if config.REQUIRE_ONU_UP and not onu:
+            store.last_reboot_ok = False
             store.add_event(st.REBOOT_SKIP,
                             "WAN caído pero el ONU no responde — no reinicio a ciegas "
                             "(puede ser corte de energía o del ISP).")
             return
 
-        if not manual:
-            # Salvaguarda 2: cooldown.
-            cd = store.cooldown_remaining()
-            if cd > 0:
-                store.add_event(st.REBOOT_SKIP,
-                                f"En cooldown, faltan {int(cd)}s para poder reiniciar.")
-                return
-            # Salvaguarda 3: tope de reboots por ventana.
-            if store.reboots_in_window() >= config.MAX_REBOOTS_WINDOW:
-                store.add_event(st.REBOOT_SKIP,
-                                f"Alcanzado el tope de {config.MAX_REBOOTS_WINDOW} reboots por "
-                                "ventana. Probablemente sea un corte del ISP; solo monitoreo.")
-                return
+        # Salvaguarda 2: tope de reboots exitosos por ventana.
+        if not manual and store.reboots_in_window() >= config.MAX_REBOOTS_WINDOW:
+            store.last_reboot_ok = True  # frena reintentos por el cooldown largo
+            store.add_event(st.REBOOT_SKIP,
+                            f"Alcanzado el tope de {config.MAX_REBOOTS_WINDOW} reboots por "
+                            "ventana. Probablemente sea un corte del ISP; solo monitoreo.")
+            return
 
         await _run_reboot(store, reboot_onu, manual)
 
 
 async def _run_reboot(store: st.Store, reboot_onu, manual: bool):
-    if not manual or not config.DRY_RUN:
-        store.record_reboot()
     store.add_event(st.REBOOT_START,
                     "Reiniciando el ONU" + (" [DRY_RUN]" if config.DRY_RUN else "") + "…")
     await notifier.push_ntfy("crappy-ISP", "Reiniciando el ONU por caída de internet", "high")
@@ -74,6 +84,7 @@ async def _run_reboot(store: st.Store, reboot_onu, manual: bool):
     try:
         res = await reboot_onu(config.SHOT_DIR)
     except Exception as e:
+        store.last_reboot_ok = False
         store.add_event(st.REBOOT_FAIL, f"Error lanzando el reboot: {e}")
         return
 
@@ -82,10 +93,15 @@ async def _run_reboot(store: st.Store, reboot_onu, manual: bool):
                         extra={"post": res["reboot_request"].get("post")})
 
     if not res.get("ok"):
+        store.last_reboot_ok = False
         store.add_event(st.REBOOT_FAIL, res.get("detail", "Falló el reboot."),
                         extra={"shots": res.get("shots", [])})
         return
 
+    # Éxito. Solo cuenta contra el tope/cooldown un reboot REAL (no dry-run).
+    store.last_reboot_ok = True
+    if not config.DRY_RUN:
+        store.record_reboot()
     store.add_event(st.REBOOT_OK, res.get("detail", "Reboot enviado."),
                     extra={"shots": res.get("shots", [])})
 
@@ -119,32 +135,39 @@ async def watchdog(store: st.Store):
             alive = await wan_alive()
             store.onu_up = await onu_alive()
 
-            if store.wan_up and not alive:
-                # Posible caída → confirmar con debounce.
-                if await _confirm(wan_alive, False, config.FAIL_THRESHOLD):
-                    store.wan_up = False
-                    store.last_change_ts = time.time()
-                    store.current_outage_start = time.time()
-                    store.add_event(st.WAN_DOWN, "Internet caído (confirmado).")
-                    await do_reboot(store)
+            if not alive:
+                if store.wan_up:
+                    # Transición a caído → confirmar con debounce.
+                    if await _confirm(wan_alive, False, config.FAIL_THRESHOLD):
+                        store.wan_up = False
+                        store.last_change_ts = time.time()
+                        store.current_outage_start = time.time()
+                        store.last_attempt_ts = None   # arrancar intentos de cero
+                        store.add_event(st.WAN_DOWN, "Internet caído (confirmado).")
+                        await try_reboot(store)
+                else:
+                    # Sigue caído → reintentar reboot (try_reboot espacia los intentos).
+                    await try_reboot(store)
 
-            elif not store.wan_up and alive:
-                # Posible recuperación → confirmar.
-                if await _confirm(wan_alive, True, config.OK_THRESHOLD):
-                    down_for = (time.time() - store.current_outage_start) \
-                        if store.current_outage_start else 0
-                    store.wan_up = True
-                    store.last_change_ts = time.time()
-                    store.current_outage_start = None
-                    store.add_event(st.WAN_UP,
-                                    f"Internet restablecido tras {int(down_for)}s de corte.")
-                    store.save()
-                    await notifier.flush_discord(store)
-
-            elif store.wan_up and alive:
-                # Todo OK: aprovechar para vaciar notificaciones pendientes.
-                if store.pending_notifications():
-                    await notifier.flush_discord(store)
+            else:
+                if not store.wan_up:
+                    # Posible recuperación → confirmar.
+                    if await _confirm(wan_alive, True, config.OK_THRESHOLD):
+                        down_for = (time.time() - store.current_outage_start) \
+                            if store.current_outage_start else 0
+                        store.wan_up = True
+                        store.last_change_ts = time.time()
+                        store.current_outage_start = None
+                        store.last_attempt_ts = None
+                        store.last_reboot_ok = False
+                        store.add_event(st.WAN_UP,
+                                        f"Internet restablecido tras {int(down_for)}s de corte.")
+                        store.save()
+                        await notifier.flush_discord(store)
+                else:
+                    # Todo OK: aprovechar para vaciar notificaciones pendientes.
+                    if store.pending_notifications():
+                        await notifier.flush_discord(store)
 
         except Exception as e:
             store.add_event(st.INFO, f"Excepción en el watchdog: {e}")

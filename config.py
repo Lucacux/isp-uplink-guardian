@@ -43,12 +43,22 @@ ONU_USER  = os.getenv("ONU_USER", "user")
 ONU_PASS  = os.getenv("ONU_PASS", "")
 
 # ── Política de reboot (salvaguardas) ─────────────────────────────────
-REBOOT_COOLDOWN     = _int("REBOOT_COOLDOWN_SECS", 1200)   # 20 min entre reboots
+REBOOT_COOLDOWN     = _int("REBOOT_COOLDOWN_SECS", 1200)   # 20 min entre reboots exitosos
 MAX_REBOOTS_WINDOW  = _int("MAX_REBOOTS_WINDOW", 3)        # tope por ventana
 REBOOT_WINDOW       = _int("REBOOT_WINDOW_SECS", 21600)    # ventana = 6 h
 POST_REBOOT_GRACE   = _int("POST_REBOOT_GRACE_SECS", 300)  # espera recuperación
 REQUIRE_ONU_UP      = _bool("REQUIRE_ONU_UP", True)        # solo si el ONU responde
 DRY_RUN             = _bool("DRY_RUN", False)              # simula, no reinicia
+# Reintento tras un intento de reboot FALLIDO (no cuenta contra el cooldown).
+# Evita esperar 20 min si el ONU estaba lento; sin relanzar chromium a lo loco.
+FAILED_REBOOT_BACKOFF = _int("FAILED_REBOOT_BACKOFF_SECS", 120)
+
+# ── Robustez de Playwright (ONU lento durante un corte) ───────────────
+# Durante un corte el panel del ONU puede tardar mucho o colgarse; por eso
+# timeouts holgados y reintentos de navegación.
+PW_NAV_TIMEOUT_MS = _int("PW_NAV_TIMEOUT_MS", 45000)   # timeout por navegación
+PW_NAV_RETRIES    = _int("PW_NAV_RETRIES", 3)          # reintentos de goto
+PW_RETRY_GAP      = _int("PW_RETRY_GAP_SECS", 5)       # espera entre reintentos
 
 # ── Dashboard LAN ─────────────────────────────────────────────────────
 DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "0.0.0.0")

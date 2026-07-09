@@ -33,6 +33,8 @@ class Store:
         self.last_reboot_ts: float | None = None
         self.started_ts: float = time.time()
         self.reboot_lock = None       # asyncio.Lock, seteado en app.main()
+        self.last_attempt_ts: float | None = None   # último INTENTO de reboot (ok o no)
+        self.last_reboot_ok: bool = False           # ¿el último intento fue exitoso?
         self._load()
 
     # ── persistencia ──────────────────────────────────────────────

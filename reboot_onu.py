@@ -32,6 +32,27 @@ async def _shot(page, shot_dir: str, name: str) -> str | None:
         return None
 
 
+async def _goto_retry(page, url: str, label: str):
+    """page.goto con reintentos y timeout holgado.
+
+    Durante un corte el panel del ONU suele responder lento o colgado; reintentar
+    da chance de que el reboot igual se ejecute (que es justo cuando más importa).
+    """
+    last = None
+    for i in range(config.PW_NAV_RETRIES):
+        try:
+            await page.goto(url, wait_until="domcontentloaded",
+                            timeout=config.PW_NAV_TIMEOUT_MS)
+            return
+        except Exception as e:
+            last = e
+            print(f"[reboot] goto {label} intento {i+1}/{config.PW_NAV_RETRIES} "
+                  f"falló: {e}", flush=True)
+            if i < config.PW_NAV_RETRIES - 1:
+                await page.wait_for_timeout(config.PW_RETRY_GAP * 1000)
+    raise RuntimeError(f"goto {label} falló tras {config.PW_NAV_RETRIES} intentos: {last}")
+
+
 async def _find_reboot_control(scope):
     """Busca el control de Reboot en un page o frame. Devuelve un locator o None."""
     selectors = [
@@ -72,6 +93,9 @@ async def reboot_onu(shot_dir: str) -> dict:
         try:
             ctx = await browser.new_context(ignore_https_errors=True)
             page = await ctx.new_page()
+            # Timeouts holgados para fills/clicks/navegación (ONU lento en corte).
+            page.set_default_timeout(config.PW_NAV_TIMEOUT_MS)
+            page.set_default_navigation_timeout(config.PW_NAV_TIMEOUT_MS)
 
             # Auto-aceptar cualquier confirm() del panel ("¿reiniciar?").
             page.on("dialog", lambda d: asyncio.create_task(d.accept()))
@@ -84,8 +108,8 @@ async def reboot_onu(shot_dir: str) -> dict:
                         captured.append({"url": req.url, "post": None})
             page.on("request", _on_request)
 
-            # 1) Login page
-            await page.goto(config.ONU_URL + "/", wait_until="domcontentloaded", timeout=20000)
+            # 1) Login page (con reintentos)
+            await _goto_retry(page, config.ONU_URL + "/", "login")
             result["shots"].append(await _shot(page, shot_dir, "1_login"))
 
             # 2-3) Credenciales + IdentCode (leído del DOM)
@@ -100,9 +124,13 @@ async def reboot_onu(shot_dir: str) -> dict:
             except Exception:
                 pass
 
-            # 4) Login
+            # 4) Login — esperar a que el form de login desaparezca (navegó al panel).
             await page.click("#LoginId")
-            await page.wait_for_timeout(2500)
+            try:
+                await page.wait_for_selector("#Frm_Password", state="detached",
+                                             timeout=config.PW_NAV_TIMEOUT_MS)
+            except Exception:
+                await page.wait_for_timeout(2500)
             result["shots"].append(await _shot(page, shot_dir, "2_after_login"))
 
             # ¿Seguimos en el login? => credenciales/lockout
@@ -110,10 +138,11 @@ async def reboot_onu(shot_dir: str) -> dict:
                 result["detail"] = "El login no avanzó (credenciales o lockout de 3 intentos)."
                 return result
 
-            # 5) Ir a la página de reboot (System Management).
-            await page.goto(
+            # 5) Ir a la página de reboot (System Management), con reintentos.
+            await _goto_retry(
+                page,
                 config.ONU_URL + "/getpage.gch?pid=1002&nextpage=manager_dev_conf_t.gch",
-                wait_until="domcontentloaded", timeout=20000,
+                "reboot-page",
             )
             await page.wait_for_timeout(1200)
             result["shots"].append(await _shot(page, shot_dir, "3_reboot_page"))
