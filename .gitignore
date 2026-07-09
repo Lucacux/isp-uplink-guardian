@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+data/
+__pycache__/
+*.pyc
+*.log
+*.png
+!assets/*.png
+.DS_Store

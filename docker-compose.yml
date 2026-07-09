@@ -1,0 +1,36 @@
+# Deploy en Dokploy (app tipo Compose).
+#
+# network_mode: host es clave:
+#   · el contenedor usa las rutas del host → alcanza el ONU en 192.168.77.1
+#     (subred distinta a la del homelab), y
+#   · el dashboard queda directo en la LAN (http://<ip-del-arch>:8090),
+#     accesible durante un corte de WAN sin depender del proxy de Dokploy.
+#
+# Los SECRETOS (ONU_PASS, DISCORD_WEBHOOK_URL) se cargan desde el panel de
+# Dokploy (Environment), NO se ponen acá ni se commitean.
+services:
+  crappy-isp:
+    build: .
+    container_name: crappy-isp
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - ONU_URL=${ONU_URL:-http://192.168.77.1}
+      - ONU_HOST=${ONU_HOST:-192.168.77.1}
+      - ONU_USER=${ONU_USER:-user}
+      - ONU_PASS=${ONU_PASS}
+      - WAN_TARGETS=${WAN_TARGETS:-8.8.8.8:53,1.1.1.1:443,9.9.9.9:53}
+      - CHECK_INTERVAL_SECS=${CHECK_INTERVAL_SECS:-30}
+      - FAIL_THRESHOLD=${FAIL_THRESHOLD:-4}
+      - REBOOT_COOLDOWN_SECS=${REBOOT_COOLDOWN_SECS:-1200}
+      - MAX_REBOOTS_WINDOW=${MAX_REBOOTS_WINDOW:-3}
+      - REBOOT_WINDOW_SECS=${REBOOT_WINDOW_SECS:-21600}
+      - REQUIRE_ONU_UP=${REQUIRE_ONU_UP:-1}
+      - DRY_RUN=${DRY_RUN:-0}
+      - DASHBOARD_PORT=${DASHBOARD_PORT:-8090}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - NTFY_URL=${NTFY_URL:-}
+      - NTFY_TOPIC=${NTFY_TOPIC:-}
+      - TZ=${TZ:-America/Argentina/Buenos_Aires}
+    volumes:
+      - ./data:/app/data

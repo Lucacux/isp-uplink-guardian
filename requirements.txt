@@ -1,0 +1,3 @@
+aiohttp>=3.9,<4
+playwright==1.48.0
+requests>=2.31    # solo para tools/login_probe.py
