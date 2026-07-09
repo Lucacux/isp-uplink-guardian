@@ -26,33 +26,47 @@ async def _confirm(check, target: bool, needed: int, interval: float = 1.5) -> b
     return True
 
 
-async def do_reboot(store: st.Store):
-    """Aplica salvaguardas y, si corresponde, reinicia el ONU."""
+async def do_reboot(store: st.Store, manual: bool = False):
+    """Aplica salvaguardas y, si corresponde, reinicia el ONU.
+
+    manual=True (disparo desde el dashboard) saltea cooldown y tope de ventana
+    porque es una acción humana explícita, pero respeta REQUIRE_ONU_UP y DRY_RUN.
+    """
     from reboot_onu import reboot_onu  # import perezoso (Playwright)
 
-    # Salvaguarda 1: el ONU tiene que estar accesible (si no, WOL no ayuda).
-    onu = await onu_alive()
-    store.onu_up = onu
-    if config.REQUIRE_ONU_UP and not onu:
-        store.add_event(st.REBOOT_SKIP,
-                        "WAN caído pero el ONU no responde — no reinicio a ciegas "
-                        "(puede ser corte de energía o del ISP).")
+    if store.reboot_lock.locked():
+        store.add_event(st.INFO, "Ya hay un reboot en curso; ignoro el disparo.")
         return
+    async with store.reboot_lock:
+        # Salvaguarda 1: el ONU tiene que estar accesible (si no, reboot no ayuda).
+        onu = await onu_alive()
+        store.onu_up = onu
+        if config.REQUIRE_ONU_UP and not onu:
+            store.add_event(st.REBOOT_SKIP,
+                            "WAN caído pero el ONU no responde — no reinicio a ciegas "
+                            "(puede ser corte de energía o del ISP).")
+            return
 
-    # Salvaguarda 2: cooldown.
-    cd = store.cooldown_remaining()
-    if cd > 0:
-        store.add_event(st.REBOOT_SKIP, f"En cooldown, faltan {int(cd)}s para poder reiniciar.")
-        return
+        if not manual:
+            # Salvaguarda 2: cooldown.
+            cd = store.cooldown_remaining()
+            if cd > 0:
+                store.add_event(st.REBOOT_SKIP,
+                                f"En cooldown, faltan {int(cd)}s para poder reiniciar.")
+                return
+            # Salvaguarda 3: tope de reboots por ventana.
+            if store.reboots_in_window() >= config.MAX_REBOOTS_WINDOW:
+                store.add_event(st.REBOOT_SKIP,
+                                f"Alcanzado el tope de {config.MAX_REBOOTS_WINDOW} reboots por "
+                                "ventana. Probablemente sea un corte del ISP; solo monitoreo.")
+                return
 
-    # Salvaguarda 3: tope de reboots por ventana.
-    if store.reboots_in_window() >= config.MAX_REBOOTS_WINDOW:
-        store.add_event(st.REBOOT_SKIP,
-                        f"Alcanzado el tope de {config.MAX_REBOOTS_WINDOW} reboots por ventana. "
-                        "Probablemente sea un corte del ISP; solo monitoreo.")
-        return
+        await _run_reboot(store, reboot_onu, manual)
 
-    store.record_reboot()
+
+async def _run_reboot(store: st.Store, reboot_onu, manual: bool):
+    if not manual or not config.DRY_RUN:
+        store.record_reboot()
     store.add_event(st.REBOOT_START,
                     "Reiniciando el ONU" + (" [DRY_RUN]" if config.DRY_RUN else "") + "…")
     await notifier.push_ntfy("crappy-ISP", "Reiniciando el ONU por caída de internet", "high")
@@ -140,7 +154,14 @@ async def watchdog(store: st.Store):
 
 async def main():
     store = st.Store()
-    await start_dashboard(store)
+    store.reboot_lock = asyncio.Lock()
+
+    async def manual_trigger():
+        """Disparo manual del reboot desde el dashboard (respeta DRY_RUN)."""
+        store.add_event(st.INFO, "Disparo manual de reboot desde el dashboard.")
+        await do_reboot(store, manual=True)
+
+    await start_dashboard(store, manual_trigger)
     await watchdog(store)
 
 

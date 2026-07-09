@@ -64,7 +64,13 @@ code{background:#222a35;padding:1px 5px;border-radius:5px}
   <div class="card"><div class="k">Cooldown</div><div class="v" id="cd">—</div></div>
   <div class="card"><div class="k">Uptime bot</div><div class="v" id="up">—</div></div>
  </div>
- <h3 style="margin:22px 0 4px">Eventos</h3>
+ <div style="margin:18px 0 4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+  <h3 style="margin:0;flex:1">Eventos</h3>
+  <button id="trig" onclick="trigger()" style="background:#21262d;color:#e6edf3;
+   border:1px solid #30363d;border-radius:8px;padding:8px 12px;cursor:pointer;
+   font-weight:600">🔄 Probar reboot</button>
+ </div>
+ <div id="trigmsg" class="sub" style="margin-bottom:6px"></div>
  <table><thead><tr><th>Hora</th><th>Evento</th><th>Detalle</th></tr></thead>
   <tbody id="events"><tr><td colspan="3">…</td></tr></tbody></table>
  <div class="foot" id="cfg"></div>
@@ -97,11 +103,24 @@ async function tick(){
   tr.innerHTML='<td class="t">'+e.iso+'</td><td class="ev">'+(EMO[e.type]||'•')+' '+
    e.type+'</td><td>'+ (e.msg||'').replace(/[<>]/g,'') +'</td>';
   tb.appendChild(tr);});
- var c=d.config||{};
+ var c=d.config||{};window.__cfg=c;
+ var tb2=document.getElementById('trig');
+ if(tb2)tb2.textContent=(c.dry_run?'🔄 Probar reboot (dry-run)':'🔄 Reiniciar ONU ahora');
  document.getElementById('cfg').innerHTML='ONU <code>'+c.onu_url+'</code> · targets '+
   (c.wan_targets||[]).join(', ')+' · check '+c.check_interval+'s · '+
   (c.dry_run?'<b>DRY_RUN</b> · ':'')+(c.discord?'discord✓ ':'discord✗ ')+
   (c.ntfy?'ntfy✓':'ntfy✗');
+}
+async function trigger(){
+ var dry = (window.__cfg&&window.__cfg.dry_run);
+ var m = dry ? "Probar el flujo de reboot en DRY_RUN (NO reinicia)?"
+             : "⚠️ Esto REINICIA el ONU y corta internet ~2 min. ¿Seguro?";
+ if(!confirm(m))return;
+ document.getElementById('trigmsg').textContent='disparando…';
+ try{var r=await fetch('/api/trigger',{method:'POST'});var d=await r.json();
+  document.getElementById('trigmsg').textContent=d.msg||d.error||'ok';}
+ catch(e){document.getElementById('trigmsg').textContent='error de red';}
+ setTimeout(tick,1500);
 }
 tick();setInterval(tick,5000);
 </script>
@@ -112,19 +131,28 @@ async def _index(_req):
     return web.Response(text=PAGE, content_type="text/html")
 
 
-def make_app(store):
+def make_app(store, trigger=None):
     async def _status(_req):
         return web.json_response(store.snapshot())
+
+    async def _trigger(_req):
+        if trigger is None:
+            return web.json_response({"ok": False, "error": "sin trigger"}, status=400)
+        # No bloqueamos la respuesta: el reboot puede tardar (Playwright).
+        import asyncio as _a
+        _a.create_task(trigger())
+        return web.json_response({"ok": True, "msg": "disparo enviado — mirá los eventos"})
 
     app = web.Application()
     app.router.add_get("/", _index)
     app.router.add_get("/api/status", _status)
+    app.router.add_post("/api/trigger", _trigger)
     app.router.add_get("/healthz", lambda _r: web.Response(text="ok"))
     return app
 
 
-async def start_dashboard(store):
-    app = make_app(store)
+async def start_dashboard(store, trigger=None):
+    app = make_app(store, trigger)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, config.DASHBOARD_HOST, config.DASHBOARD_PORT)

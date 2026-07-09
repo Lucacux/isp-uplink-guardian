@@ -32,6 +32,7 @@ class Store:
         self.reboot_history: list[float] = []          # timestamps de reboots
         self.last_reboot_ts: float | None = None
         self.started_ts: float = time.time()
+        self.reboot_lock = None       # asyncio.Lock, seteado en app.main()
         self._load()
 
     # ── persistencia ──────────────────────────────────────────────
