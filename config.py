@@ -66,6 +66,11 @@ PW_RETRY_GAP      = _int("PW_RETRY_GAP_SECS", 5)       # espera entre reintentos
 # ── Dashboard LAN ─────────────────────────────────────────────────────
 DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "0.0.0.0")
 DASHBOARD_PORT = _int("DASHBOARD_PORT", 8099)
+# Token compartido para /api/trigger (reinicia el ONU). Vacío = sin exigir
+# token (comportamiento anterior, solo para dev local). En Dokploy siempre
+# debe estar seteado. Se pasa como ?token=... (mismo patrón que Vigilancia-MBP)
+# para poder seguir abriendo el dashboard desde el celu con una URL guardada.
+DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "")
 
 # ── Notificaciones ────────────────────────────────────────────────────
 # Discord: flush diferido (se envía cuando vuelve el WAN).
@@ -89,7 +94,6 @@ def masked_summary() -> dict:
     """Config visible para el dashboard/logs, sin exponer la password."""
     return {
         "onu_url": ONU_URL,
-        "onu_user": ONU_USER,
         "onu_pass_set": bool(ONU_PASS),
         "wan_targets": WAN_TARGETS,
         "check_interval": CHECK_INTERVAL,

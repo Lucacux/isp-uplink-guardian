@@ -4,12 +4,22 @@ Sirve una página autocontenida (sin recursos externos) con el estado en vivo y
 el historial de eventos, y un endpoint JSON. Pensado para abrir desde el celu
 en el WiFi de casa durante un corte.
 """
+import hmac
 import json
 import time
 
 from aiohttp import web
 
 import config
+
+
+def _authorized(req) -> bool:
+    """Sin DASHBOARD_TOKEN configurado, deja pasar (compat dev local).
+    Con token seteado, exige ?token=... o header X-Dashboard-Token."""
+    if not config.DASHBOARD_TOKEN:
+        return True
+    supplied = req.query.get("token") or req.headers.get("X-Dashboard-Token", "")
+    return hmac.compare_digest(supplied, config.DASHBOARD_TOKEN)
 
 PAGE = """<!doctype html>
 <html lang="es"><head>
@@ -117,7 +127,8 @@ async function trigger(){
              : "⚠️ Esto REINICIA el ONU y corta internet ~2 min. ¿Seguro?";
  if(!confirm(m))return;
  document.getElementById('trigmsg').textContent='disparando…';
- try{var r=await fetch('/api/trigger',{method:'POST'});var d=await r.json();
+ try{var r=await fetch('/api/trigger'+location.search,{method:'POST'});var d=await r.json();
+  if(r.status===401){document.getElementById('trigmsg').textContent='🔒 no autorizado — abrí el dashboard con el link con ?token= guardado';return;}
   document.getElementById('trigmsg').textContent=d.msg||d.error||'ok';}
  catch(e){document.getElementById('trigmsg').textContent='error de red';}
  setTimeout(tick,1500);
@@ -135,7 +146,9 @@ def make_app(store, trigger=None):
     async def _status(_req):
         return web.json_response(store.snapshot())
 
-    async def _trigger(_req):
+    async def _trigger(req):
+        if not _authorized(req):
+            return web.json_response({"ok": False, "error": "no autorizado"}, status=401)
         if trigger is None:
             return web.json_response({"ok": False, "error": "sin trigger"}, status=400)
         # No bloqueamos la respuesta: el reboot puede tardar (Playwright).
