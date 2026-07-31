@@ -13,6 +13,59 @@ from aiohttp import web
 import config
 
 
+def _metric_bool(value) -> str:
+    if value is None:
+        return "NaN"
+    return "1" if value else "0"
+
+
+def prometheus_metrics(snapshot: dict) -> str:
+    """Render a low-cardinality Prometheus text exposition snapshot."""
+    values = {
+        "isp_wan_up": _metric_bool(snapshot.get("wan_up")),
+        "isp_onu_up": _metric_bool(snapshot.get("onu_up")),
+        "isp_outage_seconds": max(0, float(snapshot.get("outage_secs") or 0)),
+        "isp_reboots_window": max(0, int(snapshot.get("reboots_in_window") or 0)),
+        "isp_cooldown_seconds": max(
+            0, float(snapshot.get("cooldown_remaining") or 0)
+        ),
+        "isp_uptime_seconds": max(0, float(snapshot.get("uptime_secs") or 0)),
+        "isp_reboots_total": max(0, int(snapshot.get("reboots_total") or 0)),
+        "isp_last_reboot_timestamp_seconds": max(
+            0, float(snapshot.get("last_reboot_ts") or 0)
+        ),
+        "isp_last_change_timestamp_seconds": max(
+            0, float(snapshot.get("since") or 0)
+        ),
+    }
+    metadata = {
+        "isp_wan_up": ("gauge", "Whether the monitored WAN is reachable."),
+        "isp_onu_up": ("gauge", "Whether the ONU management endpoint is reachable."),
+        "isp_outage_seconds": ("gauge", "Seconds in the current WAN outage."),
+        "isp_reboots_window": ("gauge", "Successful reboots in the safety window."),
+        "isp_cooldown_seconds": ("gauge", "Seconds remaining in the reboot cooldown."),
+        "isp_uptime_seconds": ("gauge", "Guardian process uptime in seconds."),
+        "isp_reboots_total": ("counter", "Successful real ONU reboots."),
+        "isp_last_reboot_timestamp_seconds": (
+            "gauge",
+            "Unix timestamp of the last successful real reboot.",
+        ),
+        "isp_last_change_timestamp_seconds": (
+            "gauge",
+            "Unix timestamp of the last WAN state change.",
+        ),
+    }
+    lines = []
+    for name, value in values.items():
+        metric_type, help_text = metadata[name]
+        lines.extend((
+            f"# HELP {name} {help_text}",
+            f"# TYPE {name} {metric_type}",
+            f"{name} {value}",
+        ))
+    return "\n".join(lines) + "\n"
+
+
 def _authorized(req) -> bool:
     """Sin DASHBOARD_TOKEN configurado, deja pasar (compat dev local).
     Con token seteado, exige ?token=... o header X-Dashboard-Token."""
@@ -156,11 +209,23 @@ def make_app(store, trigger=None):
         _a.create_task(trigger())
         return web.json_response({"ok": True, "msg": "disparo enviado — mirá los eventos"})
 
+    async def _metrics(_req):
+        return web.Response(
+            body=prometheus_metrics(store.snapshot()).encode("utf-8"),
+            headers={
+                "Content-Type": "text/plain; version=0.0.4; charset=utf-8"
+            },
+        )
+
+    async def _healthz(_req):
+        return web.Response(text="ok")
+
     app = web.Application()
     app.router.add_get("/", _index)
     app.router.add_get("/api/status", _status)
+    app.router.add_get("/metrics", _metrics)
     app.router.add_post("/api/trigger", _trigger)
-    app.router.add_get("/healthz", lambda _r: web.Response(text="ok"))
+    app.router.add_get("/healthz", _healthz)
     return app
 
 
