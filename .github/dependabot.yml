@@ -17,8 +17,14 @@ updates:
       python-dependencies:
         patterns:
           - "*"
+    ignore:
+      # Must be upgraded together with the Dockerfile base image.
+      - dependency-name: playwright
 
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Must be upgraded together with requirements.txt.
+      - dependency-name: mcr.microsoft.com/playwright/python
