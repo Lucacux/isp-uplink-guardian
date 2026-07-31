@@ -40,6 +40,7 @@ class Store:
         self.last_change_ts: float | None = None      # último cambio de estado WAN
         self.current_outage_start: float | None = None
         self.reboot_history: list[float] = []          # timestamps de reboots
+        self.reboots_total: int = 0                    # contador persistente
         self.last_reboot_ts: float | None = None
         self.started_ts: float = time.time()
         self.reboot_lock = None       # asyncio.Lock, seteado en app.main()
@@ -55,6 +56,10 @@ class Store:
             for e in d.get("events", []):
                 self.events.append(e)
             self.reboot_history = d.get("reboot_history", [])
+            # Migración transparente desde estados anteriores al contador.
+            self.reboots_total = int(
+                d.get("reboots_total", len(self.reboot_history))
+            )
             self.last_reboot_ts = d.get("last_reboot_ts")
             self.current_outage_start = d.get("current_outage_start")
         except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -66,6 +71,7 @@ class Store:
         data = {
             "events": list(self.events),
             "reboot_history": self.reboot_history,
+            "reboots_total": self.reboots_total,
             "last_reboot_ts": self.last_reboot_ts,
             "current_outage_start": self.current_outage_start,
             "saved_at": time.time(),
@@ -106,6 +112,7 @@ class Store:
     def record_reboot(self):
         now = time.time()
         self.reboot_history.append(now)
+        self.reboots_total += 1
         self.last_reboot_ts = now
         self.save()
 
@@ -124,6 +131,7 @@ class Store:
             "outage_secs": (time.time() - self.current_outage_start)
                            if (self.wan_up is False and self.current_outage_start) else 0,
             "reboots_in_window": self.reboots_in_window(),
+            "reboots_total": self.reboots_total,
             "max_reboots": config.MAX_REBOOTS_WINDOW,
             "cooldown_remaining": self.cooldown_remaining(),
             "last_reboot_ts": self.last_reboot_ts,

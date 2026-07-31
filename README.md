@@ -26,6 +26,8 @@ so often and has to be rebooted by hand. This bot does it for you.
 4. **Traceability without WAN** (3 layers):
    - **LAN web dashboard** (`http://<host>:8099`): live status + history,
      reachable from your phone on the home Wi-Fi **during** the outage.
+   - **Prometheus metrics** (`/metrics`): WAN/ONU state, outage duration,
+     cooldown, uptime, and persistent reboot counters.
    - **Deferred Discord flush**: it buffers events and sends them to the webhook
      **when the internet comes back** (post-mortem: down / reboot / recovered).
    - **Optional ntfy**: instant local push if you run an ntfy server on the LAN.
@@ -65,7 +67,8 @@ other homelab bots. Configuration:
 - The ONU password is passed via env (Dokploy / gitignored `.env`). Never in the
   repo.
 - The ONU panel is plain HTTP on the LAN; this bot does not expose it to the WAN.
-- The dashboard is read-only and unauthenticated — keep it on the LAN.
+- The dashboard, status, and metrics endpoints are read-only and unauthenticated;
+  keep them on the LAN. Manual reboot requires `DASHBOARD_TOKEN` when configured.
 
 ## 🧰 Stack
 
