@@ -41,6 +41,10 @@ other homelab bots. Configuration:
 - **Port:** publish `8099` (container) as `8099` on the host in **host** mode, so
   the dashboard is reachable on the LAN (`http://<host>:8099`) even while the WAN
   is down — no reverse proxy in the path.
+- **Persistent mount:** create a Dokploy **named volume** called
+  `isp-uplink-guardian-data` and mount it at `/app/data`. The Dockerfile's
+  `VOLUME` declaration alone creates a new anonymous Swarm volume on every
+  deploy, which loses the event history, reboot counter, and trace screenshots.
 - **Environment** (at a minimum):
 
   ```
@@ -49,6 +53,10 @@ other homelab bots. Configuration:
   ```
 
   Everything else has sensible defaults (see `.env.example`).
+
+The Playwright Python package and the Playwright base image must always use the
+same version. Upgrade both pins in one reviewed change; separate automated bumps
+can build successfully but fail when Chromium starts.
 
 > **Network requirement:** the host must route to `192.168.77.1`. The container
 > reaches the ONU through the host's routing (egress NAT). Verify with
