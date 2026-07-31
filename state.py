@@ -56,11 +56,18 @@ class Store:
             for e in d.get("events", []):
                 self.events.append(e)
             self.reboot_history = d.get("reboot_history", [])
-            # Migración transparente desde estados anteriores al contador.
-            self.reboots_total = int(
-                d.get("reboots_total", len(self.reboot_history))
-            )
             self.last_reboot_ts = d.get("last_reboot_ts")
+            # Migración transparente desde estados anteriores al contador. La
+            # ventana deslizante puede haber purgado reboot_history, así que los
+            # eventos y last_reboot_ts aportan un límite inferior más fiable.
+            inferred_reboots = max(
+                len(self.reboot_history),
+                sum(e.get("type") == REBOOT_OK for e in self.events),
+                1 if self.last_reboot_ts is not None else 0,
+            )
+            self.reboots_total = max(
+                int(d.get("reboots_total", 0)), inferred_reboots
+            )
             self.current_outage_start = d.get("current_outage_start")
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pass
