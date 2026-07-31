@@ -61,6 +61,22 @@ class PersistentCounterTests(unittest.TestCase):
             persisted = json.loads(state_file.read_text(encoding="utf-8"))
             self.assertEqual(persisted["reboots_total"], 3)
 
+    def test_migration_recovers_counter_after_window_was_pruned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "state.json"
+            state_file.write_text(json.dumps({
+                "reboot_history": [],
+                "reboots_total": 0,
+                "last_reboot_ts": 200.0,
+                "events": [{"type": "reboot_ok"}],
+            }), encoding="utf-8")
+            with patch.object(config, "DATA_DIR", tmp), patch.object(
+                config, "STATE_FILE", str(state_file)
+            ):
+                store = Store()
+
+            self.assertEqual(store.reboots_total, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
