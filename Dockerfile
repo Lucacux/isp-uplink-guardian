@@ -1,6 +1,6 @@
 # Imagen oficial de Playwright: ya trae Chromium + todas las libs del sistema.
 # La versión del tag DEBE coincidir con playwright== en requirements.txt.
-FROM mcr.microsoft.com/playwright/python:v1.48.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.61.0-jammy
 
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
