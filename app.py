@@ -9,10 +9,12 @@ El dashboard LAN corre en el mismo event loop.
 """
 import asyncio
 import time
+from datetime import datetime
 
+import checks
 import config
 import state as st
-from checks import wan_alive, onu_alive
+from checks import wan_alive, onu_alive, router_alive, dns_ok
 from dashboard import start_dashboard
 import notifier
 
@@ -60,20 +62,41 @@ async def do_reboot(store: st.Store, manual: bool = False):
         store.onu_up = onu
         if config.REQUIRE_ONU_UP and not onu:
             store.last_reboot_ok = False
-            store.add_event(st.REBOOT_SKIP,
-                            "WAN caído pero el ONU no responde — no reinicio a ciegas "
-                            "(puede ser corte de energía o del ISP).")
+            router = await router_alive()
+            store.router_up = router
+            _skip(store, "WAN caído pero el ONU no responde — no reinicio a ciegas "
+                         + ("(puede ser corte de energía o del ISP)." if router else
+                            "(el router OpenWRT tampoco responde: el problema está de este lado)."))
             return
 
         # Salvaguarda 2: tope de reboots exitosos por ventana.
         if not manual and store.reboots_in_window() >= config.MAX_REBOOTS_WINDOW:
             store.last_reboot_ok = True  # frena reintentos por el cooldown largo
-            store.add_event(st.REBOOT_SKIP,
-                            f"Alcanzado el tope de {config.MAX_REBOOTS_WINDOW} reboots por "
-                            "ventana. Probablemente sea un corte del ISP; solo monitoreo.")
+            _skip(store, f"Alcanzado el tope de {config.MAX_REBOOTS_WINDOW} reboots por "
+                         "ventana. Probablemente sea un corte del ISP; solo monitoreo.")
             return
 
-        await _run_reboot(store, reboot_onu, manual)
+        # Una sola sesión de navegador en el ONU: si justo se están ajustando los
+        # LEDs (segundos), esperar a que terminen en vez de saltear el reboot.
+        try:
+            await asyncio.wait_for(store.onu_lock.acquire(), timeout=240)
+        except asyncio.TimeoutError:
+            store.last_reboot_ok = False
+            store.add_event(st.REBOOT_FAIL, "La sesión del panel del ONU sigue ocupada; reintento luego.")
+            return
+        try:
+            await _run_reboot(store, reboot_onu, manual)
+        finally:
+            store.onu_lock.release()
+
+
+def _skip(store: st.Store, msg: str):
+    """Registra un skip, pero una sola vez por corte si el motivo no cambió
+    (sin esto, un ONU apagado llenaba el log con un evento cada 2 min)."""
+    if msg == store.last_skip_msg:
+        return
+    store.last_skip_msg = msg
+    store.add_event(st.REBOOT_SKIP, msg)
 
 
 async def _run_reboot(store: st.Store, reboot_onu, manual: bool):
@@ -104,6 +127,8 @@ async def _run_reboot(store: st.Store, reboot_onu, manual: bool):
         store.record_reboot()
     store.add_event(st.REBOOT_OK, res.get("detail", "Reboot enviado."),
                     extra={"shots": res.get("shots", [])})
+    if not config.DRY_RUN:
+        store.led_dirty = True   # el reboot puede devolver los LEDs a su default
 
     if config.DRY_RUN:
         return
@@ -143,6 +168,7 @@ async def watchdog(store: st.Store):
                         store.last_change_ts = time.time()
                         store.current_outage_start = time.time()
                         store.last_attempt_ts = None   # arrancar intentos de cero
+                        store.last_skip_msg = None
                         store.add_event(st.WAN_DOWN, "Internet caído (confirmado).")
                         await try_reboot(store)
                 else:
@@ -175,9 +201,133 @@ async def watchdog(store: st.Store):
         await asyncio.sleep(config.CHECK_INTERVAL)
 
 
+_DIAG_NTFY = {   # diagnóstico → (prioridad ntfy) ; los demás solo quedan en el log
+    checks.DIAG_ROUTER_DNS: "default",
+    checks.DIAG_DNS_UPSTREAM: "default",
+    checks.DIAG_ROUTER_DOWN: "default",
+}
+
+
+async def diag_tick(store: st.Store):
+    """Una pasada de diagnóstico: router, DNS del router vs público, y el estado.
+
+    El DNS necesita DNS_FAIL_THRESHOLD fallos seguidos para darse por roto (un
+    SERVFAIL suelto no es un incidente). Solo registra/avisa en los cambios.
+    """
+    if await router_alive():
+        store.router_fail_count = 0
+        store.router_up = True
+    else:
+        store.router_fail_count += 1
+        if store.router_fail_count >= 2:
+            store.router_up = False
+    if config.DNS_CHECK_ENABLED:
+        r_ok, p_ok = await asyncio.gather(dns_ok(config.ROUTER_HOST), dns_ok(config.DNS_PUBLIC))
+        store.dns_public_up = p_ok
+        if r_ok:
+            store.dns_fail_count = 0
+            store.dns_router_up = True
+        else:
+            store.dns_fail_count += 1
+            if store.dns_fail_count >= config.DNS_FAIL_THRESHOLD:
+                store.dns_router_up = False
+    new = checks.diagnose(store.wan_up, store.onu_up, store.router_up,
+                          store.dns_router_up, store.dns_public_up)
+    old = store.diagnosis
+    if new == old:
+        return
+    store.diagnosis = new
+    if old is None and new == checks.DIAG_OK:
+        return   # arranque normal: no hace falta un evento
+    text = checks.DIAG_TEXT[new]
+    store.add_event(st.DIAG, f"Diagnóstico: {text}" + (f" (antes: {old})" if old else ""))
+    if new in _DIAG_NTFY:
+        await notifier.push_ntfy("ISP Uplink Guardian · diagnóstico", text, _DIAG_NTFY[new])
+    elif old in _DIAG_NTFY and new == checks.DIAG_OK:
+        await notifier.push_ntfy("ISP Uplink Guardian · diagnóstico", "Resuelto: " + text, "low")
+
+
+async def diag_loop(store: st.Store):
+    while True:
+        try:
+            await diag_tick(store)
+        except Exception as e:
+            store.add_event(st.INFO, f"Excepción en el diagnóstico: {e}")
+        await asyncio.sleep(config.CHECK_INTERVAL)
+
+
+def led_action_needed(store: st.Store, want_on: bool, now: float) -> bool:
+    """¿Hay que entrar al panel por los LEDs? Nunca durante un corte (ahí manda el
+    reboot) ni antes del backoff tras un fallo (cada intento es un login)."""
+    if not config.LED_SCHEDULE_ENABLED:
+        return False
+    if store.wan_up is not True or store.onu_up is not True:
+        return False
+    if store.reboot_lock.locked() or now < store.led_next_try_ts:
+        return False
+    return (store.led_dirty or store.leds_on is None or store.leds_on != want_on
+            or store.led_verified_ts is None
+            or now - store.led_verified_ts >= config.LED_RECHECK_SECS)
+
+
+async def led_tick(store: st.Store, apply=None):
+    from leds import apply_leds, desired_leds_on
+    apply = apply or apply_leds
+    want_on = desired_leds_on(datetime.now(st._TZ))
+    now = time.time()
+    if not led_action_needed(store, want_on, now):
+        return
+    async with store.onu_lock:
+        res = await apply(want_on)
+    if res.get("ok"):
+        before = store.leds_on
+        store.leds_on = res.get("leds_on", want_on)
+        store.led_verified_ts = time.time()
+        store.led_dirty = False
+        if store.leds_on != want_on:   # DRY_RUN o el panel no convergió: no insistir cada minuto
+            store.led_next_try_ts = time.time() + config.LED_RETRY_SECS
+        if res.get("changed") or (before is not None and before != store.leds_on):
+            franja = "horario diurno" if want_on else "horario nocturno"
+            store.add_event(st.LED, f"{res.get('detail')} ({franja})")
+        elif config.DRY_RUN and "DRY_RUN" in res.get("detail", ""):
+            store.add_event(st.LED, res["detail"])
+    else:
+        store.led_next_try_ts = time.time() + config.LED_RETRY_SECS
+        store.add_event(st.LED_FAIL, f"{res.get('detail')} — reintento en "
+                                     f"{config.LED_RETRY_SECS // 60} min.")
+
+
+async def led_loop(store: st.Store):
+    await asyncio.sleep(20)   # dejar que el watchdog fije el estado WAN/ONU inicial
+    while True:
+        try:
+            await led_tick(store)
+        except Exception as e:
+            store.led_next_try_ts = time.time() + config.LED_RETRY_SECS
+            store.add_event(st.LED_FAIL, f"Excepción en el control de LEDs: {e}")
+        await asyncio.sleep(60)
+
+
+async def browser_selftest(store: st.Store):
+    from reboot_onu import browser_selftest as _selftest
+    async with store.onu_lock:
+        try:
+            ok, detail = await asyncio.wait_for(_selftest(), timeout=120)
+        except asyncio.TimeoutError:
+            ok, detail = False, "timeout de 120 s lanzando Chromium"
+    store.browser_ok, store.browser_detail = ok, detail
+    if ok:
+        print(f"[selftest] {detail}", flush=True)
+    else:
+        store.add_event(st.REBOOT_FAIL,
+                        f"Autotest: Chromium no arranca ({detail}). El reboot del ONU NO va a funcionar.")
+        await notifier.push_ntfy("ISP Uplink Guardian", "Chromium no arranca: revisar la imagen", "high")
+
+
 async def main():
     store = st.Store()
     store.reboot_lock = asyncio.Lock()
+    store.onu_lock = asyncio.Lock()
 
     async def manual_trigger():
         """Disparo manual del reboot desde el dashboard (respeta DRY_RUN)."""
@@ -185,7 +335,9 @@ async def main():
         await do_reboot(store, manual=True)
 
     await start_dashboard(store, manual_trigger)
-    await watchdog(store)
+    if config.BROWSER_SELFTEST:
+        await browser_selftest(store)
+    await asyncio.gather(watchdog(store), diag_loop(store), led_loop(store))
 
 
 if __name__ == "__main__":

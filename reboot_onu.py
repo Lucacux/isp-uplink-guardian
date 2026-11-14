@@ -53,6 +53,81 @@ async def _goto_retry(page, url: str, label: str):
     raise RuntimeError(f"goto {label} falló tras {config.PW_NAV_RETRIES} intentos: {last}")
 
 
+BROWSER_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+
+
+async def launch_browser(pw):
+    return await pw.chromium.launch(headless=True, args=BROWSER_ARGS)
+
+
+async def new_page(browser):
+    ctx = await browser.new_context(ignore_https_errors=True)
+    page = await ctx.new_page()
+    # Timeouts holgados para fills/clicks/navegación (ONU lento en corte).
+    page.set_default_timeout(config.PW_NAV_TIMEOUT_MS)
+    page.set_default_navigation_timeout(config.PW_NAV_TIMEOUT_MS)
+    return page
+
+
+async def onu_login(page, shot_dir: str | None, shots: list) -> bool:
+    """Login humano al panel (usuario, password, IdentCode leído del DOM).
+
+    Devuelve False si seguimos en el login (credenciales o lockout de 3 intentos).
+    Un solo intento por llamada: reintentar a ciegas acerca el lockout.
+    shot_dir=None no toma screenshots (operaciones de rutina como los LEDs).
+    """
+    await _goto_retry(page, config.ONU_URL + "/", "login")
+    if shot_dir:
+        shots.append(await _shot(page, shot_dir, "1_login"))
+    await page.fill("#Frm_Username", config.ONU_USER)
+    await page.fill("#Frm_Password", config.ONU_PASS)
+    try:
+        code = await page.evaluate(
+            "() => { var e=document.getElementById('checkCode'); return e ? e.value : ''; }"
+        )
+        if code:
+            await page.fill("#Frm_IdentCode", code)
+    except Exception:
+        pass
+    # Esperar a que el form de login desaparezca (navegó al panel).
+    await page.click("#LoginId")
+    try:
+        await page.wait_for_selector("#Frm_Password", state="detached",
+                                     timeout=config.PW_NAV_TIMEOUT_MS)
+    except Exception:
+        await page.wait_for_timeout(2500)
+    if shot_dir:
+        shots.append(await _shot(page, shot_dir, "2_after_login"))
+    return await page.locator("#Frm_Password").count() == 0
+
+
+async def onu_logout(page):
+    """Best-effort: el panel admite una sola sesión; no dejarla ocupada."""
+    for path in ("/getpage.gch?pid=1001&logout=1", "/logout.gch"):
+        try:
+            await page.goto(config.ONU_URL + path, wait_until="domcontentloaded",
+                            timeout=8000)
+        except Exception:
+            pass
+
+
+async def browser_selftest() -> tuple[bool, str]:
+    """Lanza Chromium y renderiza una página en blanco. Detecta upgrades rotos."""
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as pw:
+            browser = await launch_browser(pw)
+            try:
+                page = await browser.new_page()
+                await page.set_content("<p>ok</p>")
+                ok = (await page.inner_text("p")) == "ok"
+                return ok, f"Chromium {browser.version} OK" if ok else "render inesperado"
+            finally:
+                await browser.close()
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"[:300]
+
+
 async def _reboot_mechanism(scope) -> bool:
     """True si el scope (page/frame) tiene el mecanismo de reboot del firmware.
 
@@ -112,16 +187,9 @@ async def reboot_onu(shot_dir: str) -> dict:
         return result
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
+        browser = await launch_browser(pw)
         try:
-            ctx = await browser.new_context(ignore_https_errors=True)
-            page = await ctx.new_page()
-            # Timeouts holgados para fills/clicks/navegación (ONU lento en corte).
-            page.set_default_timeout(config.PW_NAV_TIMEOUT_MS)
-            page.set_default_navigation_timeout(config.PW_NAV_TIMEOUT_MS)
+            page = await new_page(browser)
 
             # Auto-aceptar cualquier confirm() del panel ("¿reiniciar?").
             page.on("dialog", lambda d: asyncio.create_task(d.accept()))
@@ -134,33 +202,8 @@ async def reboot_onu(shot_dir: str) -> dict:
                         captured.append({"url": req.url, "post": None})
             page.on("request", _on_request)
 
-            # 1) Login page (con reintentos)
-            await _goto_retry(page, config.ONU_URL + "/", "login")
-            result["shots"].append(await _shot(page, shot_dir, "1_login"))
-
-            # 2-3) Credenciales + IdentCode (leído del DOM)
-            await page.fill("#Frm_Username", config.ONU_USER)
-            await page.fill("#Frm_Password", config.ONU_PASS)
-            try:
-                code = await page.evaluate(
-                    "() => { var e=document.getElementById('checkCode'); return e ? e.value : ''; }"
-                )
-                if code:
-                    await page.fill("#Frm_IdentCode", code)
-            except Exception:
-                pass
-
-            # 4) Login — esperar a que el form de login desaparezca (navegó al panel).
-            await page.click("#LoginId")
-            try:
-                await page.wait_for_selector("#Frm_Password", state="detached",
-                                             timeout=config.PW_NAV_TIMEOUT_MS)
-            except Exception:
-                await page.wait_for_timeout(2500)
-            result["shots"].append(await _shot(page, shot_dir, "2_after_login"))
-
-            # ¿Seguimos en el login? => credenciales/lockout
-            if await page.locator("#Frm_Password").count() > 0:
+            # 1-4) Login (con reintentos y screenshots)
+            if not await onu_login(page, shot_dir, result["shots"]):
                 result["detail"] = "El login no avanzó (credenciales o lockout de 3 intentos)."
                 return result
 

@@ -18,7 +18,8 @@ updates:
         patterns:
           - "*"
     ignore:
-      # Must be upgraded together with the Dockerfile base image.
+      # Se actualiza a mano junto con la imagen base (ver README → Playwright).
+      # tests/test_playwright_pin.py rechaza cualquier PR que los desincronice.
       - dependency-name: playwright
 
   - package-ecosystem: docker

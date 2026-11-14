@@ -29,7 +29,15 @@ REBOOT_START  = "reboot_start"
 REBOOT_OK     = "reboot_ok"
 REBOOT_FAIL   = "reboot_fail"
 REBOOT_SKIP   = "reboot_skip"     # bloqueado por cooldown / tope / ONU caído
+DIAG          = "diag"            # cambio de diagnóstico (ONU/ISP vs DNS del router)
+LED           = "led"             # LEDs del ONU cambiados por horario
+LED_FAIL      = "led_fail"
 INFO          = "info"
+
+
+def _diag_text(code: str | None) -> str:
+    from checks import DIAG_TEXT   # import perezoso: checks no depende de state
+    return DIAG_TEXT.get(code, "evaluando…") if code else "evaluando…"
 
 
 class Store:
@@ -46,6 +54,23 @@ class Store:
         self.reboot_lock = None       # asyncio.Lock, seteado en app.main()
         self.last_attempt_ts: float | None = None   # último INTENTO de reboot (ok o no)
         self.last_reboot_ok: bool = False           # ¿el último intento fue exitoso?
+        self.onu_lock = None          # asyncio.Lock: una sola sesión de Playwright en el ONU
+        self.last_skip_msg: str | None = None       # para no repetir el mismo skip en un corte
+        # Diagnóstico router/DNS
+        self.router_up: bool | None = None
+        self.dns_router_up: bool | None = None
+        self.dns_public_up: bool | None = None
+        self.dns_fail_count: int = 0
+        self.router_fail_count: int = 0
+        self.diagnosis: str | None = None
+        # LEDs (no se persiste: tras un corte de luz el ONU pudo volver a su default)
+        self.leds_on: bool | None = None
+        self.led_verified_ts: float | None = None
+        self.led_next_try_ts: float = 0.0
+        self.led_dirty: bool = True
+        # Autotest de Chromium al arrancar
+        self.browser_ok: bool | None = None
+        self.browser_detail: str = ""
         self._load()
 
     # ── persistencia ──────────────────────────────────────────────
@@ -145,5 +170,14 @@ class Store:
             "uptime_secs": time.time() - self.started_ts,
             "now": time.time(),
             "events": list(self.events)[-60:][::-1],   # últimos 60, más nuevos primero
+            "router_up": self.router_up,
+            "dns_router_up": self.dns_router_up,
+            "dns_public_up": self.dns_public_up,
+            "diagnosis": self.diagnosis,
+            "diagnosis_text": _diag_text(self.diagnosis),
+            "leds_on": self.leds_on,
+            "led_verified_ts": self.led_verified_ts,
+            "browser_ok": self.browser_ok,
+            "browser_detail": self.browser_detail,
             "config": config.masked_summary(),
         }

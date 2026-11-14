@@ -17,6 +17,9 @@ _EMOJI = {
     st.REBOOT_OK:    "✅",
     st.REBOOT_FAIL:  "❌",
     st.REBOOT_SKIP:  "⏸️",
+    st.DIAG:         "🩺",
+    st.LED:          "💡",
+    st.LED_FAIL:     "⚠️",
     st.INFO:         "ℹ️",
 }
 
