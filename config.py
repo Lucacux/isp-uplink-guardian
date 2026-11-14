@@ -63,6 +63,30 @@ PW_NAV_TIMEOUT_MS = _int("PW_NAV_TIMEOUT_MS", 45000)   # timeout por navegación
 PW_NAV_RETRIES    = _int("PW_NAV_RETRIES", 3)          # reintentos de goto
 PW_RETRY_GAP      = _int("PW_RETRY_GAP_SECS", 5)       # espera entre reintentos
 
+# ── LEDs del ONU por horario ──────────────────────────────────────────
+# De día encendidos (se ve a ojo el estado PON/LOS durante un corte); en la
+# franja de sueño, apagados. La franja puede cruzar la medianoche.
+LED_SCHEDULE_ENABLED = _bool("LED_SCHEDULE_ENABLED", True)
+LED_OFF_START        = os.getenv("LED_OFF_START", "23:00")
+LED_OFF_END          = os.getenv("LED_OFF_END", "08:00")
+LED_RECHECK_SECS     = _int("LED_RECHECK_SECS", 21600)   # re-verificar cada 6 h aunque no cambie
+LED_RETRY_SECS       = _int("LED_RETRY_SECS", 3600)      # tras un fallo (cuida el lockout de 3 logins)
+LED_PAGE             = os.getenv("LED_PAGE", "pon_manager_led_control_t.gch")
+
+# ── Diagnóstico: router OpenWRT y DNS ─────────────────────────────────
+# Distingue "falla el ONU/ISP" de "el DNS del OpenWRT se colgó". La reparación
+# del DNS la hace el propio router (router/dns-watchdog.sh); acá solo se mide.
+DNS_CHECK_ENABLED  = _bool("DNS_CHECK_ENABLED", True)
+ROUTER_HOST        = os.getenv("ROUTER_HOST", "192.168.2.1")   # gateway + resolver (dnsmasq)
+DNS_PUBLIC         = os.getenv("DNS_PUBLIC", "1.1.1.1")        # resolver de comparación
+DNS_PROBE_DOMAIN   = os.getenv("DNS_PROBE_DOMAIN", "example.com")  # se le antepone un label aleatorio
+DNS_TIMEOUT        = _int("DNS_TIMEOUT_SECS", 3)
+DNS_FAIL_THRESHOLD = _int("DNS_FAIL_THRESHOLD", 3)             # chequeos seguidos para declarar DNS roto
+
+# Al arrancar, lanzar Chromium una vez: si un upgrade de Playwright rompió el
+# navegador, se ve en el dashboard ANTES de que haga falta reiniciar el ONU.
+BROWSER_SELFTEST = _bool("BROWSER_SELFTEST", True)
+
 # ── Dashboard LAN ─────────────────────────────────────────────────────
 DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "0.0.0.0")
 DASHBOARD_PORT = _int("DASHBOARD_PORT", 8099)
@@ -105,4 +129,8 @@ def masked_summary() -> dict:
         "dry_run": DRY_RUN,
         "discord": bool(DISCORD_WEBHOOK_URL),
         "ntfy": bool(NTFY_URL and NTFY_TOPIC),
+        "led_schedule": (f"apagados {LED_OFF_START}-{LED_OFF_END}"
+                         if LED_SCHEDULE_ENABLED else "desactivado"),
+        "dns_check": DNS_CHECK_ENABLED,
+        "router_host": ROUTER_HOST,
     }

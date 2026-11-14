@@ -11,6 +11,7 @@ import time
 from aiohttp import web
 
 import config
+from checks import DIAG_TEXT
 
 
 def _metric_bool(value) -> str:
@@ -37,6 +38,11 @@ def prometheus_metrics(snapshot: dict) -> str:
         "isp_last_change_timestamp_seconds": max(
             0, float(snapshot.get("since") or 0)
         ),
+        "isp_router_up": _metric_bool(snapshot.get("router_up")),
+        "isp_dns_router_up": _metric_bool(snapshot.get("dns_router_up")),
+        "isp_dns_public_up": _metric_bool(snapshot.get("dns_public_up")),
+        "isp_onu_leds_on": _metric_bool(snapshot.get("leds_on")),
+        "isp_browser_ok": _metric_bool(snapshot.get("browser_ok")),
     }
     metadata = {
         "isp_wan_up": ("gauge", "Whether the monitored WAN is reachable."),
@@ -54,6 +60,11 @@ def prometheus_metrics(snapshot: dict) -> str:
             "gauge",
             "Unix timestamp of the last WAN state change.",
         ),
+        "isp_router_up": ("gauge", "Whether the OpenWRT router answers on :53."),
+        "isp_dns_router_up": ("gauge", "Whether the router resolver answers uncached queries."),
+        "isp_dns_public_up": ("gauge", "Whether the public comparison resolver answers."),
+        "isp_onu_leds_on": ("gauge", "ONU LEDs on (1) or off (0), as last verified."),
+        "isp_browser_ok": ("gauge", "Whether the Chromium self-test passed at startup."),
     }
     lines = []
     for name, value in values.items():
@@ -63,6 +74,14 @@ def prometheus_metrics(snapshot: dict) -> str:
             f"# TYPE {name} {metric_type}",
             f"{name} {value}",
         ))
+    # Diagnóstico como enum one-hot (cardinalidad fija = len(DIAG_TEXT)).
+    lines.extend((
+        "# HELP isp_diagnosis Current diagnosis (1 for the active state).",
+        "# TYPE isp_diagnosis gauge",
+    ))
+    current = snapshot.get("diagnosis")
+    for code in DIAG_TEXT:
+        lines.append(f'isp_diagnosis{{state="{code}"}} {1 if code == current else 0}')
     return "\n".join(lines) + "\n"
 
 
@@ -126,6 +145,12 @@ code{background:#222a35;padding:1px 5px;border-radius:5px}
   <div class="card"><div class="k">Reboots (ventana)</div><div class="v" id="reb">—</div></div>
   <div class="card"><div class="k">Cooldown</div><div class="v" id="cd">—</div></div>
   <div class="card"><div class="k">Uptime bot</div><div class="v" id="up">—</div></div>
+  <div class="card big"><span class="dot" id="ddot"></span>
+   <div><div class="k">Diagnóstico</div><div class="v" id="diag" style="font-size:16px">—</div></div></div>
+  <div class="card"><div class="k">Router</div><div class="v" id="rtr">—</div></div>
+  <div class="card"><div class="k">DNS router / público</div><div class="v" id="dns">—</div></div>
+  <div class="card"><div class="k">LEDs del ONU</div><div class="v" id="leds">—</div></div>
+  <div class="card"><div class="k">Chromium</div><div class="v" id="brw">—</div></div>
  </div>
  <div style="margin:18px 0 4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
   <h3 style="margin:0;flex:1">Eventos</h3>
@@ -143,7 +168,7 @@ function dur(s){s=Math.max(0,Math.floor(s));var d=Math.floor(s/86400);s%=86400;
  var h=Math.floor(s/3600);s%=3600;var m=Math.floor(s/60);s%=60;
  if(d)return d+"d "+h+"h";if(h)return h+"h "+m+"m";if(m)return m+"m "+s+"s";return s+"s";}
 var EMO={wan_down:"🔴",wan_up:"🟢",reboot_start:"🔄",reboot_ok:"✅",
- reboot_fail:"❌",reboot_skip:"⏸️",info:"ℹ️"};
+ reboot_fail:"❌",reboot_skip:"⏸️",info:"ℹ️",diag:"🩺",led:"💡",led_fail:"⚠️"};
 async function tick(){
  try{var r=await fetch('/api/status');var d=await r.json();}catch(e){
   document.getElementById('hsub').textContent='sin conexión al bot';return;}
@@ -160,6 +185,14 @@ async function tick(){
  document.getElementById('reb').textContent = d.reboots_in_window+' / '+d.max_reboots;
  document.getElementById('cd').textContent = d.cooldown_remaining>0?dur(d.cooldown_remaining):'listo';
  document.getElementById('up').textContent = dur(d.uptime_secs);
+ function yn(v){return v===true?'OK':v===false?'CAÍDO':'—';}
+ set('ddot', d.diagnosis==='ok'?'up':d.diagnosis?'down':'warn');
+ document.getElementById('diag').textContent = d.diagnosis_text||'—';
+ document.getElementById('rtr').textContent = yn(d.router_up);
+ document.getElementById('dns').textContent = yn(d.dns_router_up)+' / '+yn(d.dns_public_up);
+ document.getElementById('leds').textContent = d.leds_on===true?'encendidos':d.leds_on===false?'apagados':'—';
+ var b=document.getElementById('brw');b.textContent=d.browser_ok===true?'OK':d.browser_ok===false?'ROTO':'—';
+ b.title=d.browser_detail||'';
  var tb=document.getElementById('events');tb.innerHTML='';
  (d.events||[]).forEach(function(e){
   var tr=document.createElement('tr');
@@ -172,7 +205,7 @@ async function tick(){
  document.getElementById('cfg').innerHTML='ONU <code>'+c.onu_url+'</code> · targets '+
   (c.wan_targets||[]).join(', ')+' · check '+c.check_interval+'s · '+
   (c.dry_run?'<b>DRY_RUN</b> · ':'')+(c.discord?'discord✓ ':'discord✗ ')+
-  (c.ntfy?'ntfy✓':'ntfy✗');
+  (c.ntfy?'ntfy✓':'ntfy✗')+' · LEDs '+(c.led_schedule||'—')+' · router <code>'+(c.router_host||'—')+'</code>';
 }
 async function trigger(){
  var dry = (window.__cfg&&window.__cfg.dry_run);
