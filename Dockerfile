@@ -4,7 +4,7 @@
 # por la comunidad varias semanas), fijada por tag + digest para builds reproducibles.
 # El tag DEBE coincidir con playwright== en requirements.txt: lo valida
 # tests/test_playwright_pin.py en CI. Procedimiento de upgrade en el README.
-FROM mcr.microsoft.com/playwright/python:v1.64.1-noble@sha256:330d401ae23c905896a0c26c66c36fc971b621519e7b11b435a8328d7bf6e031
+FROM mcr.microsoft.com/playwright/python:v1.65.2-noble@sha256:38dd67fc654b56b3cba611e4c8eb71cd33750e1cd29eea2a5dc00b484817a75f
 
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
